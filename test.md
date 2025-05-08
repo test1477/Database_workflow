@@ -1,129 +1,73 @@
-Here's the updated workflow incorporating your Octopus login command and maintaining the automatic version increment functionality:
+Here are three approaches to handle version incrementing in your Octopus Deploy workflow:
 
+### Option 1: Auto-increment Based on Latest Release (Recommended)
 ```yaml
-name: Octopus Database Deployment
-on:
-  workflow_dispatch:
-    inputs:
-      database_name:
-        description: 'Database Name (exact case)'
-        required: true
-        type: string
-      script_url:
-        description: 'URL to SQL script or zip file'
-        required: true
-        type: string
-      script_summary:
-        description: 'Description of changes'
-        required: true
-        type: string
-
-env:
-  OCTOPUS_PROJECT: "UAT-Database-Deployment"
-  OCTOPUS_ENVIRONMENT: "UAT"
-  SQL_SERVER: "PWAGNT02-APPO"
-  OCTOPUS_URL: "https://ev-octo-server.octopus.app"
-  OCTOPUS_SPACE: "Spaces-22"
-
-jobs:
-  deploy-to-uat:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-
-      - name: Setup Octopus CLI
-        uses: OctopusDeploy/install-octopus-cli-action@v1
-        with:
-          version: latest
-
-      - name: Octopus Login
-        env:
-          OCTO_API_KEY: ${{ secrets.DATA_API_KEY }}
-        run: |
-          echo "Authenticating with Octopus server..."
-          octopus login \
-            --server "$OCTOPUS_URL" \
-            --api-key "$OCTO_API_KEY" \
-            --space "$OCTOPUS_SPACE"
-          echo "Successfully logged in to Octopus"
-
-      - name: Get Latest Release Version
-        id: get_version
-        run: |
-          # Get latest release version
-          echo "Fetching latest release version..."
-          latest=$(octopus list releases \
-            --project "$OCTOPUS_PROJECT" \
-            --output-format json | jq -r '.[0].Version')
-          
-          # Increment patch version (0.0.X)
-          new_version=$(echo $latest | awk -F. '{$NF+=1; OFS="."; print $0}')
-          echo "Latest version: $latest"
-          echo "New version: $new_version"
-          echo "::set-output name=new_version::$new_version"
-
-      - name: Create and Deploy Release
-        run: |
-          # Create new release
-          echo "Creating release ${{ steps.get_version.outputs.new_version }}..."
-          octopus create release \
-            --project "$OCTOPUS_PROJECT" \
-            --version "${{ steps.get_version.outputs.new_version }}" \
-            --variable "serverInstance:$SQL_SERVER" \
-            --variable "dbName:${{ github.event.inputs.database_name }}" \
-            --variable "SQLScripts:${{ github.event.inputs.script_url }}" \
-            --variable "DeploymentSummary:${{ github.event.inputs.script_summary }}" \
-            --variable "Authentication:WindowsAuthentication"
-
-          # Deploy to UAT
-          echo "Deploying to $OCTOPUS_ENVIRONMENT..."
-          octopus deploy release \
-            --project "$OCTOPUS_PROJECT" \
-            --version "${{ steps.get_version.outputs.new_version }}" \
-            --environment "$OCTOPUS_ENVIRONMENT" \
-            --wait-for-deployment
-          echo "Deployment completed successfully"
-
-      - name: Verify Deployment
-        if: ${{ always() }}
-        run: |
-          echo "Checking deployment status..."
-          octopus list deployments \
-            --project "$OCTOPUS_PROJECT" \
-            --limit 1 \
-            --output-format json | jq
+- name: Get and Increment Version
+  id: version
+  run: |
+    # Get latest release version
+    latest=$(octopus release list --project "githubdeploytestapp" --space "Spaces-22" --output-format=json | jq -r '.[0].Version')
+    echo "Latest version: $latest"
+    
+    # Auto-increment patch version (0.0.X+1)
+    IFS='.' read -ra ver <<< "$latest"
+    new_version="${ver[0]}.${ver[1]}.$((ver[2]+1))"
+    echo "New version: $new_version"
+    echo "new_version=$new_version" >> $GITHUB_OUTPUT
 ```
 
-Key improvements in this version:
+### Option 2: Let Octopus Auto-Generate Version
+```yaml
+- name: Create Release
+  run: |
+    octopus create-release --project "githubdeploytestapp" \
+      --space "Spaces-22" \
+      --packageVersion "auto" \  # Let Octopus generate version
+      --variable "dbName:${{ inputs.database_name }}" \
+      --variable "SQLScripts:${{ inputs.script_url }}"
+```
 
-1. **Proper Octopus Authentication**:
-   - Uses your specified login command with space context
-   - Maintains authentication throughout the workflow
+### Option 3: Date-Based Versioning
+```yaml
+- name: Generate Version
+  id: version
+  run: |
+    date=$(date +'%Y.%m.%d')
+    count=$(octopus release list --project "githubdeploytestapp" --space "Spaces-22" --filter "$date" | wc -l)
+    new_version="$date.$((count+1))"
+    echo "new_version=$new_version" >> $GITHUB_OUTPUT
+```
 
-2. **Simplified Version Management**:
-   - Uses the authenticated session for all octopus CLI commands
-   - No need to repeatedly pass API key and server URL
+### Best Practice Implementation:
+```yaml
+- name: Handle Versioning
+  id: version
+  run: |
+    # Try to get latest version
+    if latest_json=$(octopus release list --project "githubdeploytestapp" --space "Spaces-22" --output-format=json); then
+      latest=$(echo "$latest_json" | jq -r '.[0].Version')
+      echo "Found latest version: $latest"
+      IFS='.' read -ra ver <<< "$latest"
+      new_version="${ver[0]}.${ver[1]}.$((ver[2]+1))"
+    else
+      echo "No existing releases, starting at 1.0.0"
+      new_version="1.0.0"
+    fi
+    
+    echo "Using version: $new_version"
+    echo "new_version=$new_version" >> $GITHUB_OUTPUT
+```
 
-3. **Better Logging**:
-   - Added echo statements for better visibility in logs
-   - Clear separation between steps
+Key Notes:
+1. The first option gives you precise control over version increments
+2. The second option is simplest but gives less visibility
+3. The third option provides date-based tracking
+4. The best practice version includes error handling for first-time deployments
 
-4. **Consistent Space Context**:
-   - The space is set during login and persists for all commands
+Choose the method that best fits your:
+- Release frequency
+- Version tracking requirements
+- Compliance/audit needs
+- Team preferences
 
-5. **Error Handling**:
-   - The `--wait-for-deployment` flag ensures deployment completion
-   - Final verification step runs even if previous steps fail
-
-To use this workflow:
-
-1. Ensure your `DATA_API_KEY` secret is configured in GitHub
-2. The workflow will automatically:
-   - Authenticate with Octopus
-   - Find the latest release version
-   - Create a new release with incremented version
-   - Deploy to UAT with your specified variables
-3. All database name case sensitivity requirements are preserved from the input
-
-The workflow maintains all the previous functionality while being more secure and reliable with proper authentication handling.
+All methods will work with your existing deployment workflow - just replace the version generation step with your preferred option.
